@@ -13,6 +13,7 @@ from src.exchanges.base import Exchange
 from src.exchanges.deribit import DeribitExchange
 from src.exchanges.okx import OkxExchange
 from src.models import AlertEvent, OptionTicker
+from src.notifications.telegram import TelegramConfig, TelegramNotifier
 from src.storage.db import Database
 from src.ui.alert_log import AlertLogPanel
 from src.ui.dashboard import DashboardPanel
@@ -47,7 +48,15 @@ class MonitorApp(App):
             iv_rv_ratio_low=self._config["alerts"]["iv_rv_ratio_low"],
             cross_exchange_iv_diff=self._config["alerts"]["cross_exchange_iv_diff"],
             cooldown_minutes=self._config["alerts"]["cooldown_min"],
+            iv_spike_pct=self._config["alerts"].get("iv_spike_pct", 0.20),
+            iv_spike_window_min=self._config["alerts"].get("iv_spike_window_min", 30),
         )
+        tg_cfg = self._config["alerts"].get("telegram", {})
+        self._telegram = TelegramNotifier(TelegramConfig(
+            enabled=tg_cfg.get("enabled", False),
+            bot_token=tg_cfg.get("bot_token", ""),
+            chat_id=tg_cfg.get("chat_id", ""),
+        ))
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -107,6 +116,9 @@ class MonitorApp(App):
             alerts = self._alert_engine.check_iv_rv_ratio(ticker.instrument, ticker.iv, rv_14d)
             for alert in alerts:
                 self._show_alert(alert)
+        spike_alerts = self._alert_engine.check_iv_spike(ticker.instrument, ticker.iv)
+        for alert in spike_alerts:
+            self._show_alert(alert)
 
     def _show_alert(self, alert: AlertEvent) -> None:
         try:
@@ -114,6 +126,10 @@ class MonitorApp(App):
             panel.add_alert(alert)
         except Exception:
             pass
+        if self._telegram.enabled:
+            asyncio.create_task(
+                self._telegram.send(f"[{alert.level.upper()}] {alert.message}")
+            )
 
     def _refresh_ui(self) -> None:
         self._refresh_dashboard()

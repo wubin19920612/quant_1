@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from src.models import AlertEvent
@@ -12,12 +13,17 @@ class AlertEngine:
         iv_rv_ratio_low: float = 0.5,
         cross_exchange_iv_diff: float = 0.05,
         cooldown_minutes: int = 5,
+        iv_spike_pct: float = 0.20,
+        iv_spike_window_min: int = 30,
     ) -> None:
         self._iv_rv_high = iv_rv_ratio_high
         self._iv_rv_low = iv_rv_ratio_low
         self._cross_diff = cross_exchange_iv_diff
         self._cooldown = timedelta(minutes=cooldown_minutes)
         self._last_alert: dict[tuple[str, str], datetime] = {}
+        self._iv_spike_pct = iv_spike_pct
+        self._iv_spike_window = timedelta(minutes=iv_spike_window_min)
+        self._iv_history: dict[str, deque[tuple[datetime, float]]] = {}
 
     def _is_cooled_down(self, rule: str, key: str) -> bool:
         cache_key = (rule, key)
@@ -90,3 +96,38 @@ class AlertEngine:
         )
         self._record_alert("cross_exchange_iv", instrument_key)
         return [alert]
+
+    def check_iv_spike(
+        self, instrument: str, iv: float, timestamp: datetime | None = None,
+    ) -> list[AlertEvent]:
+        now = timestamp or datetime.now(timezone.utc)
+        history = self._iv_history.setdefault(instrument, deque())
+
+        # Evict expired entries
+        cutoff = now - self._iv_spike_window
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+        if history:
+            oldest_iv = history[0][1]
+            if oldest_iv > 0:
+                change_pct = (iv - oldest_iv) / oldest_iv
+                if abs(change_pct) >= self._iv_spike_pct:
+                    if self._is_cooled_down("iv_spike", instrument):
+                        direction = "up" if change_pct > 0 else "down"
+                        alert = AlertEvent(
+                            timestamp=now,
+                            level="high",
+                            rule="iv_spike",
+                            instrument=instrument,
+                            message=(
+                                f"IV spike {direction} {abs(change_pct):.1%} "
+                                f"({oldest_iv:.1f}→{iv:.1f}) for {instrument}"
+                            ),
+                        )
+                        self._record_alert("iv_spike", instrument)
+                        history.append((now, iv))
+                        return [alert]
+
+        history.append((now, iv))
+        return []
