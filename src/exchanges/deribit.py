@@ -1,10 +1,12 @@
 from __future__ import annotations
-import asyncio, json, logging
+import asyncio, json, logging, time
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 import websockets
 from websockets.asyncio.client import ClientConnection
 from src.exchanges.base import Exchange
-from src.models import OptionTicker
+from src.models import OptionTicker, OHLC
 
 logger = logging.getLogger(__name__)
 MONTH_MAP = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
@@ -16,6 +18,7 @@ class DeribitExchange(Exchange):
         self._ws: ClientConnection | None = None
         self._msg_id = 0
         self._running = False
+        self._dvol_callbacks: list[Callable[[float, datetime], Any]] = []
 
     def _next_id(self) -> int:
         self._msg_id += 1
@@ -53,6 +56,39 @@ class DeribitExchange(Exchange):
             logger.warning("Failed to parse Deribit ticker: %s", e)
             return None
 
+    def on_dvol(self, callback: Callable[[float, datetime], Any]) -> None:
+        self._dvol_callbacks.append(callback)
+
+    def _emit_dvol(self, dvol: float, ts: datetime) -> None:
+        for cb in self._dvol_callbacks:
+            cb(dvol, ts)
+
+    def parse_dvol(self, data: dict) -> tuple[float, datetime] | None:
+        try:
+            dvol = float(data["volatility"])
+            ts = datetime.fromtimestamp(data["timestamp"] / 1000, tz=timezone.utc)
+            return dvol, ts
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning("Failed to parse DVOL data: %s", e)
+            return None
+
+    @staticmethod
+    def parse_ohlc_candles(raw_candles: list[dict]) -> list[OHLC]:
+        candles = []
+        for c in raw_candles:
+            try:
+                candles.append(OHLC(
+                    timestamp=datetime.fromtimestamp(c["tick"] / 1000, tz=timezone.utc),
+                    open=float(c["open"]),
+                    high=float(c["high"]),
+                    low=float(c["low"]),
+                    close=float(c["close"]),
+                    volume=float(c["volume"]),
+                ))
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning("Failed to parse OHLC candle: %s", e)
+        return candles
+
     async def connect(self) -> None:
         self._running = True
         backoff = 1
@@ -86,16 +122,59 @@ class DeribitExchange(Exchange):
             channels = [f"ticker.{inst}.100ms" for inst in batch]
             await self._send_rpc("public/subscribe", {"channels": channels})
 
+    async def subscribe_dvol(self) -> None:
+        if not self._ws:
+            return
+        await self._send_rpc("public/subscribe", {"channels": ["deribit_volatility_index.btc_usd"]})
+
+    async def fetch_ohlc(self, currency: str = "BTC", resolution: str = "1D", count: int = 90) -> list[OHLC]:
+        if not self._ws:
+            return []
+        end_ts = int(time.time() * 1000)
+        start_ts = end_ts - count * 86400 * 1000
+        result = await self._send_rpc("public/get_tradingview_chart_data", {
+            "instrument_name": f"{currency}-PERPETUAL",
+            "start_timestamp": start_ts,
+            "end_timestamp": end_ts,
+            "resolution": resolution,
+        })
+        if not result:
+            return []
+        ticks = result.get("ticks", [])
+        opens = result.get("open", [])
+        highs = result.get("high", [])
+        lows = result.get("low", [])
+        closes = result.get("close", [])
+        volumes = result.get("volume", [])
+        candles = []
+        for i in range(len(ticks)):
+            try:
+                candles.append(OHLC(
+                    timestamp=datetime.fromtimestamp(ticks[i] / 1000, tz=timezone.utc),
+                    open=float(opens[i]), high=float(highs[i]),
+                    low=float(lows[i]), close=float(closes[i]),
+                    volume=float(volumes[i]),
+                ))
+            except (IndexError, ValueError, TypeError):
+                continue
+        return candles
+
     async def listen(self) -> None:
         if not self._ws: return
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
                 if msg.get("method") == "subscription":
+                    channel = msg["params"].get("channel", "")
                     data = msg["params"]["data"]
-                    ticker = self.parse_ticker(data)
-                    if ticker:
-                        self._emit(ticker)
+                    if channel.startswith("deribit_volatility_index"):
+                        result = self.parse_dvol(data)
+                        if result:
+                            self._emit_dvol(*result)
+                    else:
+                        ticker = self.parse_ticker(data)
+                        if ticker:
+                            self._emit(ticker)
                 elif msg.get("method") == "heartbeat" and msg.get("params", {}).get("type") == "test_request":
                     await self._send_rpc("public/test", {})
         except websockets.ConnectionClosed:
