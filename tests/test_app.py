@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import os
-import tempfile
-
 import pytest
 import yaml
 from textual.widgets import TabbedContent
 
 from src.app import MonitorApp
+from src.models import Regime
 
 
 @pytest.fixture
@@ -17,6 +15,13 @@ def config_file(tmp_path):
         "symbol": "BTC",
         "refresh_interval": 2,
         "rv_windows": [7, 14, 30],
+        "regime": {
+            "lookback_days": 30,
+            "low_z": -0.8,
+            "high_z": 0.8,
+            "crisis_z": 1.8,
+            "history_limit": 120,
+        },
         "alerts": {
             "iv_rv_ratio_high": 1.5,
             "iv_rv_ratio_low": 0.5,
@@ -49,5 +54,35 @@ async def test_app_tab_switch(config_file):
         assert tabs.active == "term"
         await pilot.press("f4")
         assert tabs.active == "alerts"
+        await pilot.press("f5")
+        assert tabs.active == "regime"
+        await pilot.press("f6")
+        assert tabs.active == "strategy"
         await pilot.press("f1")
         assert tabs.active == "dashboard"
+
+
+def test_app_initializes_regime_components_from_config(config_file):
+    app = MonitorApp(config_path=config_file)
+
+    assert app._regime_history_limit == 120
+    assert app._current_regime is Regime.NORMAL
+    assert app._current_zscore == 0.0
+    assert app._current_iv_rank == 0.0
+    assert app._regime_detector._lookback == 30
+    assert app._regime_detector._low_z == -0.8
+    assert app._regime_detector._high_z == 0.8
+    assert app._regime_detector._crisis_z == 1.8
+
+
+def test_on_dvol_tracks_bounded_history(config_file):
+    app = MonitorApp(config_path=config_file)
+    app._regime_history_limit = 3
+
+    app._on_dvol(55.0, None)
+    app._on_dvol(60.0, None)
+    app._on_dvol(65.0, None)
+    app._on_dvol(70.0, None)
+
+    assert app._current_dvol == 70.0
+    assert app._dvol_history == [60.0, 65.0, 70.0]

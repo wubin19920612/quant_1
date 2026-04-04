@@ -12,6 +12,13 @@ refresh_interval: 2
 rv_windows: [7, 14, 30]
 risk_free_rate: 0.05
 
+regime:
+  lookback_days: 90
+  low_z: -1.0
+  high_z: 1.0
+  crisis_z: 2.0
+  history_limit: 1000
+
 alerts:
   iv_rv_ratio_high: 1.5
   iv_rv_ratio_low: 0.5

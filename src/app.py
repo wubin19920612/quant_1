@@ -7,16 +7,20 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Header, Label, TabbedContent, TabPane
 from src.analytics.alerts import AlertEngine
+from src.analytics.regime_detector import RegimeDetector
 from src.analytics.rv_calculator import compute_rv_multi_window
 from src.analytics.scorer import score_deviation
+from src.analytics.strategy_advisor import StrategyAdvisor
 from src.exchanges.base import Exchange
 from src.exchanges.deribit import DeribitExchange
 from src.exchanges.okx import OkxExchange
-from src.models import AlertEvent, OptionTicker
+from src.models import AlertEvent, OptionTicker, Regime
 from src.notifications.telegram import TelegramConfig, TelegramNotifier
 from src.storage.db import Database
 from src.ui.alert_log import AlertLogPanel
 from src.ui.dashboard import DashboardPanel
+from src.ui.regime_panel import RegimePanel
+from src.ui.strategy_panel import StrategyPanel
 from src.ui.term_structure import TermStructurePanel
 from src.ui.vol_smile import VolSmilePanel
 
@@ -32,6 +36,8 @@ class MonitorApp(App):
         Binding("f2", "switch_tab('smile')", "Smile"),
         Binding("f3", "switch_tab('term')", "Term"),
         Binding("f4", "switch_tab('alerts')", "Alerts"),
+        Binding("f5", "switch_tab('regime')", "Regime"),
+        Binding("f6", "switch_tab('strategy')", "Strategy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -51,6 +57,20 @@ class MonitorApp(App):
             iv_spike_pct=self._config["alerts"].get("iv_spike_pct", 0.20),
             iv_spike_window_min=self._config["alerts"].get("iv_spike_window_min", 30),
         )
+        regime_cfg = self._config.get("regime", {})
+        self._regime_detector = RegimeDetector(
+            lookback_days=regime_cfg.get("lookback_days", 90),
+            low_z=regime_cfg.get("low_z", -1.0),
+            high_z=regime_cfg.get("high_z", 1.0),
+            crisis_z=regime_cfg.get("crisis_z", 2.0),
+        )
+        self._strategy_advisor = StrategyAdvisor()
+        self._regime_history_limit = regime_cfg.get("history_limit", 1000)
+        self._current_dvol = 0.0
+        self._dvol_history: list[float] = []
+        self._current_regime = Regime.NORMAL
+        self._current_zscore = 0.0
+        self._current_iv_rank = 0.0
         tg_cfg = self._config["alerts"].get("telegram", {})
         self._telegram = TelegramNotifier(TelegramConfig(
             enabled=tg_cfg.get("enabled", False),
@@ -69,6 +89,10 @@ class MonitorApp(App):
                 yield TermStructurePanel(id="term_panel")
             with TabPane("Alerts [F4]", id="alerts"):
                 yield AlertLogPanel(id="alert_panel")
+            with TabPane("Regime [F5]", id="regime"):
+                yield RegimePanel(id="regime_panel")
+            with TabPane("Strategy [F6]", id="strategy"):
+                yield StrategyPanel(id="strategy_panel")
         yield Label("Initializing...", id="statusbar")
         yield Footer()
 
@@ -80,6 +104,8 @@ class MonitorApp(App):
         if cfg.get("deribit", {}).get("enabled"):
             ex = DeribitExchange(ws_url=cfg["deribit"]["ws_url"])
             ex.on_ticker(self._on_ticker)
+            if hasattr(ex, "on_dvol"):
+                ex.on_dvol(self._on_dvol)
             self._exchanges.append(ex)
         if cfg.get("okx", {}).get("enabled"):
             ex = OkxExchange(ws_url=cfg["okx"]["ws_url"])
@@ -88,6 +114,7 @@ class MonitorApp(App):
         for ex in self._exchanges:
             asyncio.create_task(self._run_exchange(ex))
         self.set_interval(self._config.get("refresh_interval", 2), self._refresh_ui)
+        self._update_regime()
         self._update_status()
 
     async def _run_exchange(self, exchange: Exchange) -> None:
@@ -96,6 +123,9 @@ class MonitorApp(App):
             try:
                 await exchange.connect()
                 await exchange.subscribe_options(symbol)
+                subscribe_dvol = getattr(exchange, "subscribe_dvol", None)
+                if callable(subscribe_dvol):
+                    await subscribe_dvol()
                 self._update_status()
                 await exchange.listen()
             except Exception as e:
@@ -120,6 +150,45 @@ class MonitorApp(App):
         for alert in spike_alerts:
             self._show_alert(alert)
 
+    def _on_dvol(self, dvol: float, ts: datetime | None) -> None:
+        self._current_dvol = dvol
+        self._dvol_history = [*self._dvol_history, dvol][-self._regime_history_limit:]
+        if self._db is not None and ts is not None:
+            asyncio.create_task(self._db.save_dvol(dvol, ts))
+        self._update_regime(ts)
+
+    def _update_regime(self, ts: datetime | None = None) -> None:
+        if self._current_dvol <= 0:
+            return
+        previous_regime = self._current_regime
+        regime, zscore = self._regime_detector.classify(self._dvol_history, self._current_dvol)
+        self._current_regime = regime
+        self._current_zscore = zscore
+        history = self._dvol_history[-self._regime_history_limit:]
+        if history:
+            low = min(history)
+            high = max(history)
+            iv_rank = (self._current_dvol - low) / (high - low) if high > low else 0.0
+        else:
+            iv_rank = 0.0
+        self._current_iv_rank = max(0.0, min(1.0, iv_rank))
+        if self._db is not None and ts is not None:
+            asyncio.create_task(self._db.save_regime(regime.value, self._current_dvol, zscore, ts))
+        try:
+            panel = self.query_one("#regime_panel", RegimePanel)
+            panel.update_regime(regime, self._current_dvol, zscore, self._current_iv_rank)
+        except Exception:
+            pass
+        advice = self._strategy_advisor.advise(regime, self._current_iv_rank)
+        try:
+            panel = self.query_one("#strategy_panel", StrategyPanel)
+            panel.update_advice(advice)
+        except Exception:
+            pass
+        symbol = self._config.get("symbol", "BTC")
+        for alert in self._alert_engine.check_regime_change(symbol, regime, previous_regime):
+            self._show_alert(alert)
+
     def _show_alert(self, alert: AlertEvent) -> None:
         try:
             panel = self.query_one("#alert_panel", AlertLogPanel)
@@ -135,6 +204,7 @@ class MonitorApp(App):
         self._refresh_dashboard()
         self._refresh_smile()
         self._refresh_term_structure()
+        self._update_regime()
         self._update_status()
 
     def _refresh_dashboard(self) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from src.models import AlertEvent
+from src.models import AlertEvent, Regime
 
 
 class AlertEngine:
@@ -131,3 +131,33 @@ class AlertEngine:
 
         history.append((now, iv))
         return []
+
+    def check_regime_change(
+        self, instrument: str, new_regime: Regime, prev_regime: Regime,
+    ) -> list[AlertEvent]:
+        if new_regime == prev_regime:
+            return []
+        if not self._is_cooled_down("regime_change", "global"):
+            return []
+
+        regime_order = {
+            Regime.LOW: 0,
+            Regime.NORMAL: 1,
+            Regime.HIGH: 2,
+            Regime.CRISIS: 3,
+        }
+        level = (
+            "high"
+            if new_regime == Regime.CRISIS
+            or regime_order[new_regime] > regime_order[prev_regime]
+            else "medium"
+        )
+        alert = AlertEvent(
+            timestamp=datetime.now(timezone.utc),
+            level=level,
+            rule="regime_change",
+            instrument=instrument,
+            message=f"Regime changed: {prev_regime.value} → {new_regime.value}",
+        )
+        self._record_alert("regime_change", "global")
+        return [alert]
