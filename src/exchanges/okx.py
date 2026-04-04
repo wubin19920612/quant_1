@@ -68,7 +68,7 @@ class OkxExchange(Exchange):
 
     async def subscribe_options(self, symbol: str) -> None:
         if not self._ws: return
-        msg = {"op": "subscribe", "args": [{"channel": "opt-summary", "uly": f"{symbol}-USD"}]}
+        msg = {"op": "subscribe", "args": [{"channel": "opt-summary", "instFamily": f"{symbol}-USD"}]}
         await self._ws.send(json.dumps(msg))
 
     async def listen(self) -> None:

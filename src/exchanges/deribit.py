@@ -83,7 +83,7 @@ class DeribitExchange(Exchange):
         instruments = [i["instrument_name"] for i in result]
         for i in range(0, len(instruments), 100):
             batch = instruments[i : i + 100]
-            channels = [f"ticker.{inst}.raw" for inst in batch]
+            channels = [f"ticker.{inst}.100ms" for inst in batch]
             await self._send_rpc("public/subscribe", {"channels": channels})
 
     async def listen(self) -> None:
