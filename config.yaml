@@ -1,0 +1,25 @@
+exchanges:
+  deribit:
+    enabled: true
+    ws_url: "wss://www.deribit.com/ws/api/v2"
+  okx:
+    enabled: true
+    ws_url: "wss://ws.okx.com:8443/ws/v5/public"
+
+symbol: BTC
+refresh_interval: 2
+
+rv_windows: [7, 14, 30]
+risk_free_rate: 0.05
+
+alerts:
+  iv_rv_ratio_high: 1.5
+  iv_rv_ratio_low: 0.5
+  iv_spike_pct: 0.20
+  iv_spike_window_min: 30
+  cross_exchange_iv_diff: 0.05
+  cooldown_min: 5
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
