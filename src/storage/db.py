@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import aiosqlite
 
@@ -11,6 +12,7 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
+        Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript("""
