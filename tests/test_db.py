@@ -1,5 +1,3 @@
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -8,20 +6,11 @@ from src.storage.db import Database
 
 
 @pytest.fixture
-async def db():
-    # Use project data/ dir to avoid Windows tmp_path permission issues
-    db_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    os.makedirs(db_dir, exist_ok=True)
-    db_path = os.path.join(db_dir, "test_tmp.db")
-    database = Database(db_path)
+async def db(tmp_path):
+    database = Database(str(tmp_path / "test.db"))
     await database.initialize()
     yield database
     await database.close()
-    # Cleanup
-    try:
-        os.remove(db_path)
-    except OSError:
-        pass
 
 
 async def test_save_and_get_spot_prices(db):
