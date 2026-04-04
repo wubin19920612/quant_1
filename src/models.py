@@ -37,3 +37,20 @@ class AlertEvent:
     rule: str
     instrument: str
     message: str
+
+
+class Regime(Enum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    CRISIS = "CRISIS"
+
+
+@dataclass(frozen=True)
+class OHLC:
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
