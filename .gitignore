@@ -11,3 +11,4 @@ data/
 pytest-cache-files-*/
 .claude/
 specs/
+config.yaml
