@@ -9,3 +9,5 @@ data/
 .pytmp/
 .pycheck/
 pytest-cache-files-*/
+.claude/
+specs/
