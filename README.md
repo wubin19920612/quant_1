@@ -38,6 +38,8 @@ python -m src.main
 python src/main.py
 ```
 
+📖 **详细使用说明请查看 [USAGE.md](USAGE.md)**
+
 ## 配置
 
 编辑 `config.yaml`:
